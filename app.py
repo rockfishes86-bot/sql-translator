@@ -2,6 +2,7 @@ import streamlit as st
 import pandas as pd
 import json
 from pathlib import Path
+import mysql.connector
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Constants
@@ -11,6 +12,52 @@ SCHEMA_FILE = Path(__file__).parent / "schema.json"
 AGG_OPTIONS = ["(無)", "COUNT", "COUNT DISTINCT", "SUM", "AVG", "MAX", "MIN"]
 OPERATORS   = ["=", "!=", ">", "<", ">=", "<=", "LIKE", "IN", "BETWEEN", "IS NULL", "IS NOT NULL"]
 JOIN_TYPES  = ["LEFT JOIN", "INNER JOIN", "RIGHT JOIN"]
+
+MYSQL_CONFIG = {
+    "host": "sunggang-instance-1.cxt9jose8yw6.ap-northeast-1.rds.amazonaws.com",
+    "port": 3306,
+    "database": "TableauDashboard",
+    "user": "for_tableau",
+    "charset": "utf8mb4",
+}
+
+
+def execute_query(sql: str) -> pd.DataFrame:
+    sql_upper = sql.strip().upper()
+    if not (sql_upper.startswith("SELECT") or sql_upper.startswith("WITH")):
+        raise ValueError("安全限制：只允許執行 SELECT 查詢。")
+    conn = mysql.connector.connect(
+        **MYSQL_CONFIG,
+        password=st.secrets["MYSQL_PASSWORD"],
+    )
+    try:
+        cursor = conn.cursor(dictionary=True)
+        cursor.execute(sql)
+        rows = cursor.fetchall()
+        cursor.close()
+    finally:
+        conn.close()
+    return pd.DataFrame(rows) if rows else pd.DataFrame()
+
+
+def show_query_results(df: pd.DataFrame, key_prefix: str):
+    if df.empty:
+        st.warning("查無符合條件的資料。")
+        return
+    if df.shape == (1, 1):
+        val = df.iloc[0, 0]
+        st.metric(label=df.columns[0], value=f"{val:,}" if isinstance(val, (int, float)) else val)
+    else:
+        st.markdown(f"**查詢結果（共 {len(df):,} 筆）**")
+        st.dataframe(df, use_container_width=True)
+    csv_bytes = df.to_csv(index=False, encoding="utf-8-sig").encode("utf-8-sig")
+    st.download_button(
+        label="📥 下載 CSV",
+        data=csv_bytes,
+        file_name="query_result.csv",
+        mime="text/csv",
+        key=f"{key_prefix}_csv_dl",
+    )
 
 # ──────────────────────────────────────────────────────────────────────────────
 # Page setup
@@ -315,7 +362,7 @@ table_names = list(schema.keys())
 # Tabs
 # ──────────────────────────────────────────────────────────────────────────────
 
-tab1, tab2, tab3 = st.tabs(["📋 單表查詢", "🔗 多表 JOIN", "➕ UNION 合併"])
+tab1, tab2, tab3, tab4 = st.tabs(["📋 單表查詢", "🔗 多表 JOIN", "➕ UNION 合併", "🤖 查詢 Agent"])
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 1 — Single table
@@ -372,6 +419,14 @@ with tab1:
     if "s_sql" in st.session_state:
         st.markdown("##### ✅ 產生的 SQL（右上角可複製）")
         st.code(st.session_state.s_sql, language="sql")
+        if st.button("▶ 執行查詢", key="s_exec"):
+            with st.spinner("查詢中..."):
+                try:
+                    st.session_state.s_df = execute_query(st.session_state.s_sql)
+                except Exception as e:
+                    st.error(f"查詢失敗：{e}")
+        if "s_df" in st.session_state:
+            show_query_results(st.session_state.s_df, "s")
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 2 — JOIN
@@ -530,6 +585,14 @@ with tab2:
     if "j_sql" in st.session_state:
         st.markdown("##### ✅ 產生的 SQL（右上角可複製）")
         st.code(st.session_state.j_sql, language="sql")
+        if st.button("▶ 執行查詢", key="j_exec"):
+            with st.spinner("查詢中..."):
+                try:
+                    st.session_state.j_df = execute_query(st.session_state.j_sql)
+                except Exception as e:
+                    st.error(f"查詢失敗：{e}")
+        if "j_df" in st.session_state:
+            show_query_results(st.session_state.j_df, "j")
 
 # ══════════════════════════════════════════════════════════════════════════════
 # TAB 3 — UNION
@@ -582,3 +645,35 @@ with tab3:
     if "u_sql" in st.session_state:
         st.markdown("##### ✅ 產生的 SQL（右上角可複製）")
         st.code(st.session_state.u_sql, language="sql")
+        if st.button("▶ 執行查詢", key="u_exec"):
+            with st.spinner("查詢中..."):
+                try:
+                    st.session_state.u_df = execute_query(st.session_state.u_sql)
+                except Exception as e:
+                    st.error(f"查詢失敗：{e}")
+        if "u_df" in st.session_state:
+            show_query_results(st.session_state.u_df, "u")
+
+# ══════════════════════════════════════════════════════════════════════════════
+# TAB 4 — 直接執行 SQL
+# ══════════════════════════════════════════════════════════════════════════════
+with tab4:
+    st.markdown("### ▶ 直接執行 SQL")
+    st.caption("貼上任何 SELECT 語句，直接查詢資料庫並下載結果。")
+
+    manual_sql = st.text_area(
+        "SQL 語句",
+        height=200,
+        placeholder="SELECT ...\nFROM ...\nWHERE ...",
+        key="manual_sql",
+    )
+
+    if st.button("▶ 執行", type="primary", key="manual_exec") and manual_sql.strip():
+        with st.spinner("查詢中..."):
+            try:
+                st.session_state.manual_df = execute_query(manual_sql.strip())
+            except Exception as e:
+                st.error(f"查詢失敗：{e}")
+
+    if "manual_df" in st.session_state:
+        show_query_results(st.session_state.manual_df, "manual")
